@@ -221,6 +221,33 @@ class StatusSelect(ui.Select):
 
 
 # ============================================================================
+# Assignee Select Menu
+# ============================================================================
+
+class AssigneeSelect(ui.UserSelect):
+    """Select menu for assigning a user to a task."""
+
+    def __init__(
+        self,
+        task_id: str,
+        callback: Callable[[discord.Interaction, str, discord.Member | discord.User | None], Coroutine[Any, Any, None]],
+    ) -> None:
+        self.task_id = task_id
+        self._callback = callback
+
+        super().__init__(
+            placeholder="Assigner a quelqu'un...",
+            min_values=0,
+            max_values=1,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected_user = self.values[0] if self.values else None
+        await self._callback(interaction, self.task_id, selected_user)
+
+
+# ============================================================================
 # Task Action Buttons
 # ============================================================================
 
@@ -230,35 +257,40 @@ class TaskActionView(ui.View):
     def __init__(
         self,
         task: "Task",
+        assignee_name: str | None,
         on_done: Callable[[discord.Interaction, str], Coroutine[Any, Any, None]],
         on_edit: Callable[[discord.Interaction, "Task"], Coroutine[Any, Any, None]],
         on_status_change: Callable[[discord.Interaction, str, str], Coroutine[Any, Any, None]],
+        on_assign: Callable[[discord.Interaction, str, discord.Member | discord.User | None], Coroutine[Any, Any, None]],
     ) -> None:
         super().__init__(timeout=300)
         self.task = task
+        self.assignee_name = assignee_name
         self._on_done = on_done
         self._on_edit = on_edit
 
         task_id = str(task.id)
 
-        # Add status select
+        # Row 0: Status select
         self.add_item(StatusSelect(task_id, task.status, on_status_change))
 
-        # Quick done button (only if not already done)
+        # Row 1: Assignee select
+        self.add_item(AssigneeSelect(task_id, on_assign))
+
+        # Row 2: Action buttons
         if task.status != "done":
             done_btn = ui.Button(
                 label="Terminer",
                 style=discord.ButtonStyle.success,
-                custom_id=f"done:{task_id[:8]}",
+                row=2,
             )
             done_btn.callback = self._handle_done
             self.add_item(done_btn)
 
-        # Edit button
         edit_btn = ui.Button(
             label="Modifier",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"edit:{task_id[:8]}",
+            row=2,
         )
         edit_btn.callback = self._handle_edit
         self.add_item(edit_btn)
@@ -483,7 +515,7 @@ class QuickActionsView(ui.View):
 # Embed Builders
 # ============================================================================
 
-def build_task_embed(task: "Task") -> discord.Embed:
+def build_task_embed(task: "Task", assignee_name: str | None = None) -> discord.Embed:
     """Build embed for a single task."""
     status_config = STATUS_CONFIG.get(task.status, STATUS_CONFIG["todo"])
 
@@ -501,6 +533,12 @@ def build_task_embed(task: "Task") -> discord.Embed:
     )
 
     embed.add_field(
+        name="Assignee",
+        value=assignee_name or "_Non assigne_",
+        inline=True,
+    )
+
+    embed.add_field(
         name="Deadline",
         value=format_due(task.due_at),
         inline=True,
@@ -513,11 +551,22 @@ def build_task_embed(task: "Task") -> discord.Embed:
 
 def build_task_list_embed(
     tasks: list["Task"],
+    assignee_names: dict[str, str] | None = None,
     page: int = 0,
     total_pages: int = 1,
     filter_label: str | None = None,
 ) -> discord.Embed:
-    """Build embed for task list."""
+    """Build embed for task list.
+
+    Args:
+        tasks: List of tasks to display
+        assignee_names: Mapping of user_id -> display_name for assignees
+        page: Current page number
+        total_pages: Total number of pages
+        filter_label: Label for active filter
+    """
+    assignee_names = assignee_names or {}
+
     if not tasks:
         embed = discord.Embed(
             title="Taches",
@@ -565,12 +614,21 @@ def build_task_list_embed(
         status_label = get_status_label(task.status)
         due = format_due(task.due_at)
 
-        value = f"{status_label} | {due}"
+        # Get assignee name
+        assignee = "Non assigne"
+        if task.assignee_user_id:
+            assignee = assignee_names.get(str(task.assignee_user_id), "Utilisateur inconnu")
+
+        # Build value line
+        info_line = f"{status_label} | {assignee} | {due}"
+
         if task.description:
-            desc_preview = task.description[:80]
-            if len(task.description) > 80:
+            desc_preview = task.description[:60]
+            if len(task.description) > 60:
                 desc_preview += "..."
-            value = f"{desc_preview}\n_{status_label} | {due}_"
+            value = f"{desc_preview}\n_{info_line}_"
+        else:
+            value = info_line
 
         embed.add_field(
             name=task.title,

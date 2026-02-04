@@ -23,6 +23,8 @@ from .services import (
     get_or_create_user,
     get_or_create_workspace,
     get_task_by_id,
+    get_user_by_id,
+    get_users_by_ids,
     list_tasks,
     update_task,
 )
@@ -86,15 +88,24 @@ def create_bot() -> commands.Bot:
                 )
                 return
 
+            # Get assignee name if assigned
+            assignee_name = None
+            if task.assignee_user_id:
+                assignee = await get_user_by_id(session, user_id=task.assignee_user_id)
+                if assignee:
+                    assignee_name = assignee.display_name
+
             view = TaskActionView(
                 task=task,
+                assignee_name=assignee_name,
                 on_done=handle_task_done,
                 on_edit=handle_task_edit,
                 on_status_change=handle_status_change,
+                on_assign=handle_assign,
             )
 
             await interaction.response.send_message(
-                embed=build_task_embed(task),
+                embed=build_task_embed(task, assignee_name=assignee_name),
                 view=view,
                 ephemeral=True,
             )
@@ -254,16 +265,94 @@ def create_bot() -> commands.Bot:
 
             LOGGER.info("Task status changed id=%s from=%s to=%s", task.id, old_status, new_status)
 
+            # Get assignee name for refresh
+            assignee_name = None
+            if task.assignee_user_id:
+                assignee = await get_user_by_id(session, user_id=task.assignee_user_id)
+                if assignee:
+                    assignee_name = assignee.display_name
+
             # Refresh the task view
             view = TaskActionView(
                 task=task,
+                assignee_name=assignee_name,
                 on_done=handle_task_done,
                 on_edit=handle_task_edit,
                 on_status_change=handle_status_change,
+                on_assign=handle_assign,
             )
 
             await interaction.response.edit_message(
-                embed=build_task_embed(task),
+                embed=build_task_embed(task, assignee_name=assignee_name),
+                view=view,
+            )
+
+    async def handle_assign(
+        interaction: discord.Interaction,
+        task_id: str,
+        member: discord.Member | discord.User | None,
+    ) -> None:
+        """Handle assigning a user to a task."""
+        guild = interaction.guild
+        if not guild:
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            actor = await get_or_create_user(
+                session,
+                discord_user_id=str(interaction.user.id),
+                display_name=interaction.user.display_name,
+            )
+            task = await get_task_by_id(session, workspace_id=workspace.id, task_id=task_id)
+
+            if not task:
+                await interaction.response.send_message(
+                    embed=build_error_embed("Tache introuvable"),
+                    ephemeral=True,
+                )
+                return
+
+            # Get or create the assignee user if one was selected
+            assignee_user_id = None
+            assignee_name = None
+            if member:
+                assignee = await get_or_create_user(
+                    session,
+                    discord_user_id=str(member.id),
+                    display_name=member.display_name,
+                )
+                assignee_user_id = assignee.id
+                assignee_name = assignee.display_name
+
+            await update_task(session, task=task, assignee_user_id=assignee_user_id)
+            await log_action(
+                session,
+                workspace_id=workspace.id,
+                actor_user_id=actor.id,
+                action="task.assign",
+                entity_type="task",
+                entity_id=str(task.id),
+                payload={"assignee_user_id": str(assignee_user_id) if assignee_user_id else None},
+            )
+            await session.commit()
+
+            LOGGER.info("Task assigned id=%s assignee=%s", task.id, assignee_name or "None")
+
+            # Refresh the task view
+            view = TaskActionView(
+                task=task,
+                assignee_name=assignee_name,
+                on_done=handle_task_done,
+                on_edit=handle_task_edit,
+                on_status_change=handle_status_change,
+                on_assign=handle_assign,
+            )
+
+            await interaction.response.edit_message(
+                embed=build_task_embed(task, assignee_name=assignee_name),
                 view=view,
             )
 
@@ -302,7 +391,7 @@ def create_bot() -> commands.Bot:
                 workspace_id=workspace.id,
                 title=title,
                 description=description,
-                assignee_user_id=creator.id,  # Auto-assign to creator
+                assignee_user_id=None,  # No auto-assign - collaborative workspace
                 created_by_user_id=creator.id,
                 due_in_days=due_in_days,
             )
@@ -340,6 +429,10 @@ def create_bot() -> commands.Bot:
             )
             tasks = await list_tasks(session, workspace_id=workspace.id, limit=50)
 
+            # Get assignee names
+            assignee_ids = [t.assignee_user_id for t in tasks if t.assignee_user_id]
+            assignee_names = await get_users_by_ids(session, user_ids=assignee_ids)
+
         view = TaskListView(
             tasks=tasks,
             on_task_select=handle_task_select,
@@ -348,7 +441,7 @@ def create_bot() -> commands.Bot:
         )
 
         await interaction.response.edit_message(
-            embed=build_task_list_embed(tasks),
+            embed=build_task_list_embed(tasks, assignee_names=assignee_names),
             view=view,
         )
 
@@ -403,6 +496,10 @@ def create_bot() -> commands.Bot:
                 )
                 tasks = await list_tasks(session, workspace_id=workspace.id, limit=50)
 
+                # Get assignee names
+                assignee_ids = [t.assignee_user_id for t in tasks if t.assignee_user_id]
+                assignee_names = await get_users_by_ids(session, user_ids=assignee_ids)
+
             view = TaskListView(
                 tasks=tasks,
                 on_task_select=handle_task_select,
@@ -415,7 +512,7 @@ def create_bot() -> commands.Bot:
             LOGGER.info("Task list opened tasks=%d duration=%.2fms", len(tasks), duration_ms)
 
         await interaction.followup.send(
-            embed=build_task_list_embed(tasks),
+            embed=build_task_list_embed(tasks, assignee_names=assignee_names),
             view=view,
             ephemeral=True,
         )
@@ -467,7 +564,7 @@ def create_bot() -> commands.Bot:
                     workspace_id=workspace.id,
                     title=title,
                     description=None,
-                    assignee_user_id=creator.id,  # Auto-assign to creator
+                    assignee_user_id=None,  # No auto-assign - collaborative workspace
                     created_by_user_id=creator.id,
                     due_in_days=due,
                 )

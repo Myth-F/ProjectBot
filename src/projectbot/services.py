@@ -158,6 +158,7 @@ async def update_task(
     title: str | None = None,
     description: str | None = None,
     status: str | None = None,
+    assignee_user_id: uuid.UUID | None = ...,  # Use ... as sentinel for "not provided"
 ) -> Task:
     """Update a task's fields."""
     if title is not None:
@@ -166,8 +167,45 @@ async def update_task(
         task.description = description
     if status is not None:
         task.status = status
+    if assignee_user_id is not ...:  # Only update if explicitly provided
+        task.assignee_user_id = assignee_user_id
     await session.flush()
     return task
+
+
+async def get_user_by_id(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID | str,
+) -> User | None:
+    """Get a user by their ID."""
+    if isinstance(user_id, str):
+        user_id = uuid.UUID(user_id)
+
+    result = await session.execute(
+        select(User).where(User.id == user_id)
+    )
+    return result.scalars().first()
+
+
+async def get_users_by_ids(
+    session: AsyncSession,
+    *,
+    user_ids: list[uuid.UUID],
+) -> dict[str, str]:
+    """Get display names for multiple users.
+
+    Returns a dict mapping user_id (as string) to display_name.
+    """
+    if not user_ids:
+        return {}
+
+    result = await session.execute(
+        select(User).where(User.id.in_(user_ids))
+    )
+    users = result.scalars().all()
+
+    return {str(user.id): user.display_name for user in users}
 
 
 def format_task_line(task: Task) -> str:
