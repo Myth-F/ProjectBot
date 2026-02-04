@@ -22,6 +22,7 @@ from .services import (
 
 
 def create_bot() -> commands.Bot:
+    # Shared DB session factory for all commands.
     session_maker = get_sessionmaker()
 
     intents = discord.Intents.default()
@@ -30,6 +31,7 @@ def create_bot() -> commands.Bot:
     bot = commands.Bot(command_prefix="!", intents=intents)
 
     async def setup_hook() -> None:
+        # Ensure tables exist before commands run (minimal bootstrap).
         await init_db()
 
     bot.setup_hook = setup_hook
@@ -38,6 +40,7 @@ def create_bot() -> commands.Bot:
     async def on_ready():
         logging.getLogger("projectbot.bot").info("Connected as %s", bot.user)
         try:
+            # Register slash commands with Discord.
             synced = await bot.tree.sync()
             logging.getLogger("projectbot.bot").info("Synced %s commands", len(synced))
         except Exception as exc:
@@ -47,6 +50,7 @@ def create_bot() -> commands.Bot:
     async def ping(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Pong!")
 
+    # --- Workspace bootstrap ---
     @bot.tree.command(name="setup", description="Initialise le workspace pour ce serveur")
     @app_commands.guild_only()
     @app_commands.describe(timezone="Fuseau horaire (ex: Europe/Paris)")
@@ -65,6 +69,7 @@ def create_bot() -> commands.Bot:
             user_id=str(interaction.user.id),
         ):
             async with session_maker() as session:
+                # Upsert workspace/user + ensure admin membership.
                 workspace = await get_or_create_workspace(
                     session,
                     guild_id=str(guild.id),
@@ -98,6 +103,7 @@ def create_bot() -> commands.Bot:
             ephemeral=True,
         )
 
+    # --- Task commands ---
     task_group = app_commands.Group(name="task", description="Gestion des taches")
 
     @task_group.command(name="add", description="Ajouter une tache")
@@ -129,6 +135,7 @@ def create_bot() -> commands.Bot:
             user_id=str(interaction.user.id),
         ):
             async with session_maker() as session:
+                # Ensure workspace + users exist, then persist the task.
                 workspace = await get_or_create_workspace(
                     session,
                     guild_id=str(guild.id),
@@ -194,6 +201,7 @@ def create_bot() -> commands.Bot:
             user_id=str(interaction.user.id),
         ):
             async with session_maker() as session:
+                # Read-only list for current workspace.
                 workspace = await get_or_create_workspace(
                     session,
                     guild_id=str(guild.id),
@@ -230,6 +238,7 @@ def create_bot() -> commands.Bot:
             user_id=str(interaction.user.id),
         ):
             async with session_maker() as session:
+                # Resolve task by prefix, mark done, and audit.
                 workspace = await get_or_create_workspace(
                     session,
                     guild_id=str(guild.id),
@@ -264,6 +273,7 @@ def create_bot() -> commands.Bot:
 
     bot.tree.add_command(task_group)
 
+    # --- Diagnostics ---
     @bot.tree.command(name="status", description="Diagnostic du bot")
     @app_commands.guild_only()
     async def status(interaction: discord.Interaction) -> None:
@@ -284,6 +294,7 @@ def create_bot() -> commands.Bot:
 
     @bot.tree.command(name="help", description="Aide rapide")
     async def help_cmd(interaction: discord.Interaction) -> None:
+        # Keep help short and actionable.
         await interaction.response.send_message(
             "Commandes: `/setup`, `/task add`, `/task list`, `/task done`, `/status`",
             ephemeral=True,

@@ -12,17 +12,26 @@ guild_id_var: ContextVar[str] = ContextVar("guild_id", default="-")
 channel_id_var: ContextVar[str] = ContextVar("channel_id", default="-")
 
 
-class ContextFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.correlation_id = correlation_id_var.get()
-        record.workspace_id = workspace_id_var.get()
-        record.user_id = user_id_var.get()
-        record.guild_id = guild_id_var.get()
-        record.channel_id = channel_id_var.get()
-        return True
+_base_factory = logging.getLogRecordFactory()
+_factory_set = False
+
+
+def _record_factory(*args, **kwargs) -> logging.LogRecord:
+    record = _base_factory(*args, **kwargs)
+    record.correlation_id = correlation_id_var.get()
+    record.workspace_id = workspace_id_var.get()
+    record.user_id = user_id_var.get()
+    record.guild_id = guild_id_var.get()
+    record.channel_id = channel_id_var.get()
+    return record
 
 
 def configure_logging(level: str) -> None:
+    global _factory_set
+    if not _factory_set:
+        logging.setLogRecordFactory(_record_factory)
+        _factory_set = True
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format=(
@@ -31,7 +40,6 @@ def configure_logging(level: str) -> None:
             "user_id=%(user_id)s guild_id=%(guild_id)s channel_id=%(channel_id)s"
         ),
     )
-    logging.getLogger().addFilter(ContextFilter())
 
 
 @contextmanager
