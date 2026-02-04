@@ -21,6 +21,20 @@ from .services import (
 )
 
 
+LOGGER = logging.getLogger("projectbot.bot")
+
+TIMEZONE_CHOICES = [
+    app_commands.Choice(name="UTC", value="UTC"),
+    app_commands.Choice(name="Europe/Paris", value="Europe/Paris"),
+    app_commands.Choice(name="Europe/London", value="Europe/London"),
+    app_commands.Choice(name="Europe/Berlin", value="Europe/Berlin"),
+    app_commands.Choice(name="America/New_York", value="America/New_York"),
+    app_commands.Choice(name="America/Los_Angeles", value="America/Los_Angeles"),
+    app_commands.Choice(name="Asia/Tokyo", value="Asia/Tokyo"),
+    app_commands.Choice(name="Asia/Singapore", value="Asia/Singapore"),
+]
+
+
 def create_bot() -> commands.Bot:
     # Shared DB session factory for all commands.
     session_maker = get_sessionmaker()
@@ -38,13 +52,13 @@ def create_bot() -> commands.Bot:
 
     @bot.event
     async def on_ready():
-        logging.getLogger("projectbot.bot").info("Connected as %s", bot.user)
+        LOGGER.info("Connected as %s", bot.user)
         try:
             # Register slash commands with Discord.
             synced = await bot.tree.sync()
-            logging.getLogger("projectbot.bot").info("Synced %s commands", len(synced))
+            LOGGER.info("Synced %s commands", len(synced))
         except Exception as exc:
-            logging.getLogger("projectbot.bot").exception("Command sync failed: %s", exc)
+            LOGGER.exception("Command sync failed: %s", exc)
 
     @bot.tree.command(name="ping", description="Health check for ProjectBot")
     async def ping(interaction: discord.Interaction) -> None:
@@ -54,6 +68,7 @@ def create_bot() -> commands.Bot:
     @bot.tree.command(name="setup", description="Initialise le workspace pour ce serveur")
     @app_commands.guild_only()
     @app_commands.describe(timezone="Fuseau horaire (ex: Europe/Paris)")
+    @app_commands.choices(timezone=TIMEZONE_CHOICES)
     async def setup(interaction: discord.Interaction, timezone: str | None = None) -> None:
         correlation_id = uuid.uuid4().hex
         guild = interaction.guild
@@ -97,6 +112,8 @@ def create_bot() -> commands.Bot:
                     payload={"timezone": workspace.timezone},
                 )
                 await session.commit()
+
+        LOGGER.info("Workspace setup completed for guild=%s", guild.id)
 
         await interaction.followup.send(
             f"Workspace initialise pour **{guild.name}** (timezone: {timezone or 'UTC'}).",
@@ -179,6 +196,8 @@ def create_bot() -> commands.Bot:
                 )
                 await session.commit()
 
+        LOGGER.info("Task created id=%s", task.id)
+
         await interaction.followup.send(
             f"Tache creee: **{title}** (id: `{str(task.id)[:8]}`)", ephemeral=True
         )
@@ -210,6 +229,8 @@ def create_bot() -> commands.Bot:
                 tasks = await list_tasks(
                     session, workspace_id=workspace.id, limit=limit or 10
                 )
+
+        LOGGER.info("Listed %s tasks", len(tasks))
 
         if not tasks:
             await interaction.followup.send("Aucune tache pour le moment.", ephemeral=True)
@@ -266,6 +287,8 @@ def create_bot() -> commands.Bot:
                     payload={"status": "done"},
                 )
                 await session.commit()
+
+        LOGGER.info("Task marked done id=%s", task.id)
 
         await interaction.followup.send(
             f"Tache terminee: `{str(task.id)[:8]}`", ephemeral=True
