@@ -302,7 +302,7 @@ def create_bot() -> commands.Bot:
                 workspace_id=workspace.id,
                 title=title,
                 description=description,
-                assignee_user_id=None,
+                assignee_user_id=creator.id,  # Auto-assign to creator
                 created_by_user_id=creator.id,
                 due_in_days=due_in_days,
             )
@@ -467,7 +467,7 @@ def create_bot() -> commands.Bot:
                     workspace_id=workspace.id,
                     title=title,
                     description=None,
-                    assignee_user_id=None,
+                    assignee_user_id=creator.id,  # Auto-assign to creator
                     created_by_user_id=creator.id,
                     due_in_days=due,
                 )

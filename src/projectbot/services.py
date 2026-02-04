@@ -22,6 +22,9 @@ async def get_or_create_workspace(
     )
     workspace = result.scalar_one_or_none()
     if workspace:
+        # Update name if it changed or was empty
+        if workspace.name != name:
+            workspace.name = name
         return workspace
 
     workspace = Workspace(discord_guild_id=guild_id, name=name, timezone=timezone_name)

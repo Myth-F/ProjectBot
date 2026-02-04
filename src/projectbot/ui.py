@@ -506,12 +506,6 @@ def build_task_embed(task: "Task") -> discord.Embed:
         inline=True,
     )
 
-    embed.add_field(
-        name="ID",
-        value=f"`{short_id(task.id)}`",
-        inline=True,
-    )
-
     embed.set_footer(text="ProjectBot")
 
     return embed
@@ -579,7 +573,7 @@ def build_task_list_embed(
             value = f"{desc_preview}\n_{status_label} | {due}_"
 
         embed.add_field(
-            name=f"`{short_id(task.id)}` {task.title}",
+            name=task.title,
             value=value,
             inline=False,
         )
