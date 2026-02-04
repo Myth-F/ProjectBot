@@ -1,7 +1,7 @@
 """
 ProjectBot Discord Bot
 ======================
-Main Discord bot with slash commands and observability.
+Interactive Discord bot with Views, Buttons, Select Menus, and Modals.
 """
 
 import logging
@@ -20,21 +20,24 @@ from .redis_client import ping_redis
 from .services import (
     create_task,
     ensure_membership,
-    find_task_by_prefix,
     get_or_create_user,
     get_or_create_workspace,
+    get_task_by_id,
     list_tasks,
+    update_task,
 )
 from .ui import (
-    embed_guild_only,
-    embed_help,
-    embed_ping,
-    embed_status,
-    embed_task_created,
-    embed_task_done,
-    embed_task_list,
-    embed_task_not_found,
-    embed_workspace_setup,
+    TaskActionView,
+    TaskCreateModal,
+    TaskEditModal,
+    TaskListView,
+    build_error_embed,
+    build_help_embed,
+    build_status_embed,
+    build_success_embed,
+    build_task_embed,
+    build_task_list_embed,
+    build_workspace_setup_embed,
 )
 
 LOGGER = logging.getLogger("projectbot.bot")
@@ -60,15 +63,304 @@ def create_bot() -> commands.Bot:
 
     bot = commands.Bot(command_prefix="!", intents=intents)
 
+    # ========================================================================
+    # Helper Functions for Interactive Callbacks
+    # ========================================================================
+
+    async def handle_task_select(interaction: discord.Interaction, task_id: str) -> None:
+        """Handle task selection from the list."""
+        guild = interaction.guild
+        if not guild:
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            task = await get_task_by_id(session, workspace_id=workspace.id, task_id=task_id)
+
+            if not task:
+                await interaction.response.send_message(
+                    embed=build_error_embed("Tache introuvable"),
+                    ephemeral=True,
+                )
+                return
+
+            view = TaskActionView(
+                task=task,
+                on_done=handle_task_done,
+                on_edit=handle_task_edit,
+                on_status_change=handle_status_change,
+            )
+
+            await interaction.response.send_message(
+                embed=build_task_embed(task),
+                view=view,
+                ephemeral=True,
+            )
+
+    async def handle_task_done(interaction: discord.Interaction, task_id: str) -> None:
+        """Handle marking a task as done."""
+        guild = interaction.guild
+        if not guild:
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            actor = await get_or_create_user(
+                session,
+                discord_user_id=str(interaction.user.id),
+                display_name=interaction.user.display_name,
+            )
+            task = await get_task_by_id(session, workspace_id=workspace.id, task_id=task_id)
+
+            if not task:
+                await interaction.response.send_message(
+                    embed=build_error_embed("Tache introuvable"),
+                    ephemeral=True,
+                )
+                return
+
+            task.status = "done"
+            await log_action(
+                session,
+                workspace_id=workspace.id,
+                actor_user_id=actor.id,
+                action="task.done",
+                entity_type="task",
+                entity_id=str(task.id),
+                payload={"status": "done"},
+            )
+            await session.commit()
+
+            LOGGER.info("Task marked done id=%s", task.id)
+
+            await interaction.response.edit_message(
+                embed=build_success_embed(
+                    "Tache terminee",
+                    f"**{task.title}** a ete marquee comme terminee.",
+                ),
+                view=None,
+            )
+
+    async def handle_task_edit(interaction: discord.Interaction, task: "Task") -> None:
+        """Handle opening the edit modal for a task."""
+        modal = TaskEditModal(
+            task_id=str(task.id),
+            current_title=task.title,
+            current_description=task.description,
+            callback=handle_task_edit_submit,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def handle_task_edit_submit(
+        interaction: discord.Interaction,
+        task_id: str,
+        new_title: str,
+        new_description: str | None,
+    ) -> None:
+        """Handle task edit modal submission."""
+        guild = interaction.guild
+        if not guild:
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            actor = await get_or_create_user(
+                session,
+                discord_user_id=str(interaction.user.id),
+                display_name=interaction.user.display_name,
+            )
+            task = await get_task_by_id(session, workspace_id=workspace.id, task_id=task_id)
+
+            if not task:
+                await interaction.response.send_message(
+                    embed=build_error_embed("Tache introuvable"),
+                    ephemeral=True,
+                )
+                return
+
+            await update_task(
+                session,
+                task=task,
+                title=new_title,
+                description=new_description,
+            )
+            await log_action(
+                session,
+                workspace_id=workspace.id,
+                actor_user_id=actor.id,
+                action="task.update",
+                entity_type="task",
+                entity_id=str(task.id),
+                payload={"title": new_title, "description": new_description},
+            )
+            await session.commit()
+
+            LOGGER.info("Task updated id=%s", task.id)
+
+            await interaction.response.send_message(
+                embed=build_success_embed(
+                    "Tache modifiee",
+                    f"**{task.title}** a ete mise a jour.",
+                ),
+                ephemeral=True,
+            )
+
+    async def handle_status_change(
+        interaction: discord.Interaction,
+        task_id: str,
+        new_status: str,
+    ) -> None:
+        """Handle task status change from select menu."""
+        guild = interaction.guild
+        if not guild:
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            actor = await get_or_create_user(
+                session,
+                discord_user_id=str(interaction.user.id),
+                display_name=interaction.user.display_name,
+            )
+            task = await get_task_by_id(session, workspace_id=workspace.id, task_id=task_id)
+
+            if not task:
+                await interaction.response.send_message(
+                    embed=build_error_embed("Tache introuvable"),
+                    ephemeral=True,
+                )
+                return
+
+            old_status = task.status
+            await update_task(session, task=task, status=new_status)
+            await log_action(
+                session,
+                workspace_id=workspace.id,
+                actor_user_id=actor.id,
+                action="task.status_change",
+                entity_type="task",
+                entity_id=str(task.id),
+                payload={"old_status": old_status, "new_status": new_status},
+            )
+            await session.commit()
+
+            LOGGER.info("Task status changed id=%s from=%s to=%s", task.id, old_status, new_status)
+
+            # Refresh the task view
+            view = TaskActionView(
+                task=task,
+                on_done=handle_task_done,
+                on_edit=handle_task_edit,
+                on_status_change=handle_status_change,
+            )
+
+            await interaction.response.edit_message(
+                embed=build_task_embed(task),
+                view=view,
+            )
+
+    async def handle_create_from_list(interaction: discord.Interaction) -> None:
+        """Handle create button from task list."""
+        modal = TaskCreateModal(callback=handle_create_modal_submit)
+        await interaction.response.send_modal(modal)
+
+    async def handle_create_modal_submit(
+        interaction: discord.Interaction,
+        title: str,
+        description: str | None,
+        due_in_days: int | None,
+    ) -> None:
+        """Handle task creation modal submission."""
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message(
+                embed=build_error_embed("Commande non disponible en DM"),
+                ephemeral=True,
+            )
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            creator = await get_or_create_user(
+                session,
+                discord_user_id=str(interaction.user.id),
+                display_name=interaction.user.display_name,
+            )
+
+            task = await create_task(
+                session,
+                workspace_id=workspace.id,
+                title=title,
+                description=description,
+                assignee_user_id=None,
+                created_by_user_id=creator.id,
+                due_in_days=due_in_days,
+            )
+
+            await log_action(
+                session,
+                workspace_id=workspace.id,
+                actor_user_id=creator.id,
+                action="task.create",
+                entity_type="task",
+                entity_id=str(task.id),
+                payload={"title": title, "due_in_days": due_in_days},
+            )
+            await session.commit()
+
+            LOGGER.info("Task created id=%s title=%s", task.id, title)
+
+            await interaction.response.send_message(
+                embed=build_success_embed(
+                    "Tache creee",
+                    f"**{title}** a ete ajoutee a vos taches.",
+                ),
+                ephemeral=True,
+            )
+
+    async def handle_refresh_list(interaction: discord.Interaction) -> None:
+        """Handle refresh button on task list."""
+        guild = interaction.guild
+        if not guild:
+            return
+
+        async with session_maker() as session:
+            workspace = await get_or_create_workspace(
+                session, guild_id=str(guild.id), name=guild.name
+            )
+            tasks = await list_tasks(session, workspace_id=workspace.id, limit=50)
+
+        view = TaskListView(
+            tasks=tasks,
+            on_task_select=handle_task_select,
+            on_create=handle_create_from_list,
+            on_refresh=handle_refresh_list,
+        )
+
+        await interaction.response.edit_message(
+            embed=build_task_list_embed(tasks),
+            view=view,
+        )
+
+    # ========================================================================
+    # Bot Events
+    # ========================================================================
+
     async def setup_hook() -> None:
         await init_db()
         LOGGER.info("Database initialized")
 
     bot.setup_hook = setup_hook
-
-    # ========================================================================
-    # Bot Events
-    # ========================================================================
 
     @bot.event
     async def on_ready() -> None:
@@ -80,43 +372,21 @@ def create_bot() -> commands.Bot:
             LOGGER.exception("Command sync failed: %s", exc)
 
     # ========================================================================
-    # Health Check
+    # Main Task Command - Interactive List
     # ========================================================================
 
-    @bot.tree.command(name="ping", description="Health check - verifie que le bot repond")
-    async def ping(interaction: discord.Interaction) -> None:
-        correlation_id = uuid.uuid4().hex
-        start_time = time.perf_counter()
-
-        with log_context(
-            correlation_id=correlation_id,
-            user_id=str(interaction.user.id),
-            operation="cmd.ping",
-        ):
-            LOGGER.info("Ping command received")
-            latency_ms = (time.perf_counter() - start_time) * 1000 + (bot.latency * 1000)
-
-            embed = embed_ping(latency_ms)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-            metrics.record("cmd.ping", latency_ms, success=True)
-            LOGGER.info("Ping response sent latency=%.2fms", latency_ms)
-
-    # ========================================================================
-    # Workspace Setup
-    # ========================================================================
-
-    @bot.tree.command(name="setup", description="Initialise le workspace pour ce serveur")
+    @bot.tree.command(name="task", description="Ouvrir le gestionnaire de taches")
     @app_commands.guild_only()
-    @app_commands.describe(timezone="Fuseau horaire (ex: Europe/Paris)")
-    @app_commands.choices(timezone=TIMEZONE_CHOICES)
-    async def setup(interaction: discord.Interaction, timezone: str | None = None) -> None:
+    async def task_cmd(interaction: discord.Interaction) -> None:
         correlation_id = uuid.uuid4().hex
         start_time = time.perf_counter()
         guild = interaction.guild
 
         if not guild:
-            await interaction.response.send_message(embed=embed_guild_only(), ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_error_embed("Commande non disponible en DM"),
+                ephemeral=True,
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -124,12 +394,135 @@ def create_bot() -> commands.Bot:
         with log_context(
             correlation_id=correlation_id,
             guild_id=str(guild.id),
-            channel_id=str(interaction.channel_id),
+            user_id=str(interaction.user.id),
+            operation="cmd.task",
+        ):
+            async with session_maker() as session:
+                workspace = await get_or_create_workspace(
+                    session, guild_id=str(guild.id), name=guild.name
+                )
+                tasks = await list_tasks(session, workspace_id=workspace.id, limit=50)
+
+            view = TaskListView(
+                tasks=tasks,
+                on_task_select=handle_task_select,
+                on_create=handle_create_from_list,
+                on_refresh=handle_refresh_list,
+            )
+
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            metrics.record("cmd.task", duration_ms, success=True)
+            LOGGER.info("Task list opened tasks=%d duration=%.2fms", len(tasks), duration_ms)
+
+        await interaction.followup.send(
+            embed=build_task_list_embed(tasks),
+            view=view,
+            ephemeral=True,
+        )
+
+    # ========================================================================
+    # Quick Add Command
+    # ========================================================================
+
+    @bot.tree.command(name="add", description="Creer une tache rapidement")
+    @app_commands.guild_only()
+    @app_commands.describe(
+        title="Titre de la tache",
+        due="Deadline en jours (optionnel)",
+    )
+    async def add_cmd(
+        interaction: discord.Interaction,
+        title: str,
+        due: int | None = None,
+    ) -> None:
+        correlation_id = uuid.uuid4().hex
+        start_time = time.perf_counter()
+        guild = interaction.guild
+
+        if not guild:
+            await interaction.response.send_message(
+                embed=build_error_embed("Commande non disponible en DM"),
+                ephemeral=True,
+            )
+            return
+
+        with log_context(
+            correlation_id=correlation_id,
+            guild_id=str(guild.id),
+            user_id=str(interaction.user.id),
+            operation="cmd.add",
+        ):
+            async with session_maker() as session:
+                workspace = await get_or_create_workspace(
+                    session, guild_id=str(guild.id), name=guild.name
+                )
+                creator = await get_or_create_user(
+                    session,
+                    discord_user_id=str(interaction.user.id),
+                    display_name=interaction.user.display_name,
+                )
+
+                task = await create_task(
+                    session,
+                    workspace_id=workspace.id,
+                    title=title,
+                    description=None,
+                    assignee_user_id=None,
+                    created_by_user_id=creator.id,
+                    due_in_days=due,
+                )
+
+                await log_action(
+                    session,
+                    workspace_id=workspace.id,
+                    actor_user_id=creator.id,
+                    action="task.create",
+                    entity_type="task",
+                    entity_id=str(task.id),
+                    payload={"title": title, "due_in_days": due},
+                )
+                await session.commit()
+
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                metrics.record("cmd.add", duration_ms, success=True)
+                LOGGER.info("Task created id=%s duration=%.2fms", task.id, duration_ms)
+
+        await interaction.response.send_message(
+            embed=build_success_embed(
+                "Tache creee",
+                f"**{title}** a ete ajoutee.\n\nUtilisez `/task` pour la voir.",
+            ),
+            ephemeral=True,
+        )
+
+    # ========================================================================
+    # Setup Command
+    # ========================================================================
+
+    @bot.tree.command(name="setup", description="Initialiser le workspace")
+    @app_commands.guild_only()
+    @app_commands.describe(timezone="Fuseau horaire")
+    @app_commands.choices(timezone=TIMEZONE_CHOICES)
+    async def setup_cmd(interaction: discord.Interaction, timezone: str | None = None) -> None:
+        correlation_id = uuid.uuid4().hex
+        start_time = time.perf_counter()
+        guild = interaction.guild
+
+        if not guild:
+            await interaction.response.send_message(
+                embed=build_error_embed("Commande non disponible en DM"),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        with log_context(
+            correlation_id=correlation_id,
+            guild_id=str(guild.id),
             user_id=str(interaction.user.id),
             operation="cmd.setup",
         ):
-            LOGGER.info("Setup command for guild=%s timezone=%s", guild.name, timezone or "UTC")
-
             async with session_maker() as session:
                 workspace = await get_or_create_workspace(
                     session,
@@ -161,223 +554,18 @@ def create_bot() -> commands.Bot:
 
             duration_ms = (time.perf_counter() - start_time) * 1000
             metrics.record("cmd.setup", duration_ms, success=True)
-            LOGGER.info("Workspace setup completed duration=%.2fms", duration_ms)
+            LOGGER.info("Setup completed duration=%.2fms", duration_ms)
 
-        embed = embed_workspace_setup(guild.name, timezone or "UTC")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ========================================================================
-    # Task Commands
-    # ========================================================================
-
-    task_group = app_commands.Group(name="task", description="Gestion des taches")
-
-    @task_group.command(name="add", description="Ajouter une nouvelle tache")
-    @app_commands.guild_only()
-    @app_commands.describe(
-        title="Titre de la tache",
-        description="Description optionnelle",
-        assignee="Assigner a un membre",
-        due_in_days="Deadline en jours (ex: 3)",
-    )
-    async def task_add(
-        interaction: discord.Interaction,
-        title: str,
-        description: str | None = None,
-        assignee: discord.Member | None = None,
-        due_in_days: int | None = None,
-    ) -> None:
-        correlation_id = uuid.uuid4().hex
-        start_time = time.perf_counter()
-        guild = interaction.guild
-
-        if not guild:
-            await interaction.response.send_message(embed=embed_guild_only(), ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        with log_context(
-            correlation_id=correlation_id,
-            guild_id=str(guild.id),
-            channel_id=str(interaction.channel_id),
-            user_id=str(interaction.user.id),
-            operation="cmd.task.add",
-        ):
-            LOGGER.info("Task add command title=%s assignee=%s due=%s", title, assignee, due_in_days)
-
-            async with session_maker() as session:
-                workspace = await get_or_create_workspace(
-                    session,
-                    guild_id=str(guild.id),
-                    name=guild.name,
-                )
-                creator = await get_or_create_user(
-                    session,
-                    discord_user_id=str(interaction.user.id),
-                    display_name=interaction.user.display_name,
-                )
-
-                assignee_user_id = None
-                if assignee:
-                    assignee_user = await get_or_create_user(
-                        session,
-                        discord_user_id=str(assignee.id),
-                        display_name=assignee.display_name,
-                    )
-                    assignee_user_id = assignee_user.id
-
-                task = await create_task(
-                    session,
-                    workspace_id=workspace.id,
-                    title=title,
-                    description=description,
-                    assignee_user_id=assignee_user_id,
-                    created_by_user_id=creator.id,
-                    due_in_days=due_in_days,
-                )
-
-                await log_action(
-                    session,
-                    workspace_id=workspace.id,
-                    actor_user_id=creator.id,
-                    action="task.create",
-                    entity_type="task",
-                    entity_id=str(task.id),
-                    payload={
-                        "title": title,
-                        "assignee": str(assignee.id) if assignee else None,
-                        "due_in_days": due_in_days,
-                    },
-                )
-                await session.commit()
-
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                metrics.record("cmd.task.add", duration_ms, success=True)
-                LOGGER.info("Task created id=%s duration=%.2fms", task.id, duration_ms)
-
-                embed = embed_task_created(task)
-                await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @task_group.command(name="list", description="Lister les taches du workspace")
-    @app_commands.guild_only()
-    @app_commands.describe(limit="Nombre max de taches (defaut: 10)")
-    async def task_list_cmd(interaction: discord.Interaction, limit: int | None = None) -> None:
-        correlation_id = uuid.uuid4().hex
-        start_time = time.perf_counter()
-        guild = interaction.guild
-
-        if not guild:
-            await interaction.response.send_message(embed=embed_guild_only(), ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        with log_context(
-            correlation_id=correlation_id,
-            guild_id=str(guild.id),
-            channel_id=str(interaction.channel_id),
-            user_id=str(interaction.user.id),
-            operation="cmd.task.list",
-        ):
-            LOGGER.info("Task list command limit=%s", limit or 10)
-
-            async with session_maker() as session:
-                workspace = await get_or_create_workspace(
-                    session,
-                    guild_id=str(guild.id),
-                    name=guild.name,
-                )
-                tasks = await list_tasks(
-                    session,
-                    workspace_id=workspace.id,
-                    limit=limit or 10,
-                )
-
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            metrics.record("cmd.task.list", duration_ms, success=True)
-            LOGGER.info("Listed %d tasks duration=%.2fms", len(tasks), duration_ms)
-
-        embed = embed_task_list(tasks, workspace_name=guild.name)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @task_group.command(name="done", description="Marquer une tache comme terminee")
-    @app_commands.guild_only()
-    @app_commands.describe(task_id="Prefixe de l'ID de la tache")
-    async def task_done_cmd(interaction: discord.Interaction, task_id: str) -> None:
-        correlation_id = uuid.uuid4().hex
-        start_time = time.perf_counter()
-        guild = interaction.guild
-
-        if not guild:
-            await interaction.response.send_message(embed=embed_guild_only(), ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        with log_context(
-            correlation_id=correlation_id,
-            guild_id=str(guild.id),
-            channel_id=str(interaction.channel_id),
-            user_id=str(interaction.user.id),
-            operation="cmd.task.done",
-        ):
-            LOGGER.info("Task done command task_id_prefix=%s", task_id)
-
-            async with session_maker() as session:
-                workspace = await get_or_create_workspace(
-                    session,
-                    guild_id=str(guild.id),
-                    name=guild.name,
-                )
-                actor = await get_or_create_user(
-                    session,
-                    discord_user_id=str(interaction.user.id),
-                    display_name=interaction.user.display_name,
-                )
-
-                task = await find_task_by_prefix(
-                    session,
-                    workspace_id=workspace.id,
-                    task_id_prefix=task_id,
-                )
-
-                if not task:
-                    duration_ms = (time.perf_counter() - start_time) * 1000
-                    metrics.record("cmd.task.done", duration_ms, success=False)
-                    LOGGER.warning("Task not found prefix=%s", task_id)
-
-                    embed = embed_task_not_found(task_id)
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-                    return
-
-                task.status = "done"
-
-                await log_action(
-                    session,
-                    workspace_id=workspace.id,
-                    actor_user_id=actor.id,
-                    action="task.done",
-                    entity_type="task",
-                    entity_id=str(task.id),
-                    payload={"status": "done"},
-                )
-                await session.commit()
-
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                metrics.record("cmd.task.done", duration_ms, success=True)
-                LOGGER.info("Task marked done id=%s duration=%.2fms", task.id, duration_ms)
-
-                embed = embed_task_done(task)
-                await interaction.followup.send(embed=embed, ephemeral=True)
-
-    bot.tree.add_command(task_group)
+        await interaction.followup.send(
+            embed=build_workspace_setup_embed(guild.name, timezone or "UTC"),
+            ephemeral=True,
+        )
 
     # ========================================================================
-    # Diagnostics
+    # Status Command
     # ========================================================================
 
-    @bot.tree.command(name="status", description="Diagnostic du bot et des services")
+    @bot.tree.command(name="status", description="Voir l'etat du systeme")
     @app_commands.guild_only()
     async def status_cmd(interaction: discord.Interaction) -> None:
         correlation_id = uuid.uuid4().hex
@@ -388,85 +576,59 @@ def create_bot() -> commands.Bot:
         with log_context(
             correlation_id=correlation_id,
             guild_id=str(interaction.guild_id),
-            channel_id=str(interaction.channel_id),
             user_id=str(interaction.user.id),
             operation="cmd.status",
         ):
-            LOGGER.info("Status command")
-
             db_ok = await ping_db()
             redis_ok = await ping_redis()
+            latency_ms = (time.perf_counter() - start_time) * 1000
 
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            metrics.record("cmd.status", duration_ms, success=True)
-            LOGGER.info("Status check db=%s redis=%s duration=%.2fms", db_ok, redis_ok, duration_ms)
+            metrics.record("cmd.status", latency_ms, success=True)
+            LOGGER.info("Status db=%s redis=%s duration=%.2fms", db_ok, redis_ok, latency_ms)
 
-        embed = embed_status(db_ok, redis_ok)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(
+            embed=build_status_embed(db_ok, redis_ok, latency_ms),
+            ephemeral=True,
+        )
 
     # ========================================================================
-    # Help
+    # Help Command
     # ========================================================================
 
-    @bot.tree.command(name="help", description="Aide et liste des commandes")
+    @bot.tree.command(name="help", description="Aide")
     async def help_cmd(interaction: discord.Interaction) -> None:
-        correlation_id = uuid.uuid4().hex
-
         with log_context(
-            correlation_id=correlation_id,
+            correlation_id=uuid.uuid4().hex,
             user_id=str(interaction.user.id),
             operation="cmd.help",
         ):
             LOGGER.info("Help command")
             metrics.record("cmd.help", 0, success=True)
 
-        embed = embed_help()
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_help_embed(),
+            ephemeral=True,
+        )
 
     # ========================================================================
-    # Metrics Command (internal/debug)
+    # Ping Command
     # ========================================================================
 
-    @bot.tree.command(name="metrics", description="Affiche les metriques internes du bot")
-    @app_commands.guild_only()
-    async def metrics_cmd(interaction: discord.Interaction) -> None:
-        correlation_id = uuid.uuid4().hex
-
+    @bot.tree.command(name="ping", description="Verifier que le bot repond")
+    async def ping_cmd(interaction: discord.Interaction) -> None:
         with log_context(
-            correlation_id=correlation_id,
+            correlation_id=uuid.uuid4().hex,
             user_id=str(interaction.user.id),
-            operation="cmd.metrics",
+            operation="cmd.ping",
         ):
-            LOGGER.info("Metrics command")
+            latency_ms = bot.latency * 1000
+            LOGGER.info("Ping latency=%.2fms", latency_ms)
+            metrics.record("cmd.ping", latency_ms, success=True)
 
-            all_stats = metrics.get_all_stats()
-
-            if not all_stats:
-                await interaction.response.send_message(
-                    "```\nAucune metrique disponible.\n```",
-                    ephemeral=True,
-                )
-                return
-
-            lines = [
-                "+--[ Metriques ]-------------------------+",
-                "| Operation          | Cnt | Avg    | SR  |",
-                "+----------------------------------------+",
-            ]
-
-            for stat in all_stats:
-                op = stat["operation"][:18].ljust(18)
-                cnt = str(stat["count"]).rjust(3)
-                avg = f"{stat['avg_duration_ms']:.0f}ms".rjust(6)
-                sr = f"{stat['success_rate']*100:.0f}%".rjust(3)
-                lines.append(f"| {op} | {cnt} | {avg} | {sr} |")
-
-            lines.append("+----------------------------------------+")
-
-            await interaction.response.send_message(
-                f"```\n{chr(10).join(lines)}\n```",
-                ephemeral=True,
-            )
+        await interaction.response.send_message(
+            embed=build_success_embed("Pong", f"Latence: {latency_ms:.0f}ms"),
+            ephemeral=True,
+        )
 
     return bot
 
@@ -478,15 +640,14 @@ def main() -> None:
     configure_logging(settings.log_level, json_format=json_format)
 
     LOGGER.info(
-        "Starting ProjectBot env=%s log_level=%s format=%s",
+        "Starting ProjectBot env=%s log_level=%s",
         settings.environment,
         settings.log_level,
-        "json" if json_format else "text",
     )
 
     if not settings.discord_token:
-        LOGGER.critical("DISCORD_TOKEN is required to run the bot")
-        raise RuntimeError("DISCORD_TOKEN is required to run the bot")
+        LOGGER.critical("DISCORD_TOKEN is required")
+        raise RuntimeError("DISCORD_TOKEN is required")
 
     bot = create_bot()
     bot.run(settings.discord_token)

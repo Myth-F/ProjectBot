@@ -129,6 +129,44 @@ async def find_task_by_prefix(
     return result.scalars().first()
 
 
+async def get_task_by_id(
+    session: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    task_id: uuid.UUID | str,
+) -> Task | None:
+    """Get a task by its full ID."""
+    if isinstance(task_id, str):
+        task_id = uuid.UUID(task_id)
+
+    result = await session.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.id == task_id,
+        )
+    )
+    return result.scalars().first()
+
+
+async def update_task(
+    session: AsyncSession,
+    *,
+    task: Task,
+    title: str | None = None,
+    description: str | None = None,
+    status: str | None = None,
+) -> Task:
+    """Update a task's fields."""
+    if title is not None:
+        task.title = title
+    if description is not None:
+        task.description = description
+    if status is not None:
+        task.status = status
+    await session.flush()
+    return task
+
+
 def format_task_line(task: Task) -> str:
     task_id = str(task.id)[:8]
     due = task.due_at.astimezone(timezone.utc).date().isoformat() if task.due_at else "-"

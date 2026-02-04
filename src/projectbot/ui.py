@@ -1,439 +1,699 @@
 """
 ProjectBot UI Module
 ====================
-Centralized UI components with ASCII art and Discord embeds.
-No emojis - pure ASCII aesthetics.
+Modern Discord UI with Views, Buttons, Select Menus, and Modals.
+Focus: Maximum usability with minimal friction.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Coroutine, Any
+from uuid import UUID
 
 import discord
+from discord import ui
 
 if TYPE_CHECKING:
     from .models import Task
 
+LOGGER = logging.getLogger("projectbot.ui")
+
 # ============================================================================
-# ASCII Art Constants
+# Constants
 # ============================================================================
 
-BRAND_HEADER = """
-```
- ____            _           _   ____        _
-|  _ \\ _ __ ___ (_) ___  ___| |_| __ )  ___ | |_
-| |_) | '__/ _ \\| |/ _ \\/ __| __|  _ \\ / _ \\| __|
-|  __/| | | (_) | |  __/ (__| |_| |_) | (_) | |_
-|_|   |_|  \\___// |\\___|\\___|\\__|____/ \\___/ \\__|
-              |__/
-```"""
-
-MINI_LOGO = "[ProjectBot]"
-
-# Box drawing characters for tables
-BOX_TL = "+"  # Top-left
-BOX_TR = "+"  # Top-right
-BOX_BL = "+"  # Bottom-left
-BOX_BR = "+"  # Bottom-right
-BOX_H = "-"   # Horizontal
-BOX_V = "|"   # Vertical
-BOX_CROSS = "+"
-
-# Status indicators (ASCII only)
-STATUS_ICONS = {
-    "todo": "[ ]",
-    "in_progress": "[~]",
-    "blocked": "[!]",
-    "done": "[x]",
+# Task status configuration
+STATUS_CONFIG = {
+    "todo": {"label": "A faire", "color": 0x99AAB5, "style": discord.ButtonStyle.secondary},
+    "in_progress": {"label": "En cours", "color": 0x5865F2, "style": discord.ButtonStyle.primary},
+    "blocked": {"label": "Bloque", "color": 0xFEE75C, "style": discord.ButtonStyle.danger},
+    "done": {"label": "Termine", "color": 0x57F287, "style": discord.ButtonStyle.success},
 }
 
-# Section dividers
-DIVIDER_LIGHT = "-" * 40
-DIVIDER_HEAVY = "=" * 40
-DIVIDER_DOTS = "." * 40
+ITEMS_PER_PAGE = 5
 
 
 # ============================================================================
-# Color Palette (Discord embed colors)
+# Utility Functions
 # ============================================================================
 
-class Colors:
-    """Discord embed color palette."""
-    PRIMARY = 0x5865F2      # Discord Blurple
-    SUCCESS = 0x57F287      # Green
-    WARNING = 0xFEE75C      # Yellow
-    ERROR = 0xED4245        # Red
-    INFO = 0x5865F2         # Blue
-    NEUTRAL = 0x99AAB5      # Gray
-
-    # Status-specific colors
-    STATUS_TODO = 0x99AAB5
-    STATUS_IN_PROGRESS = 0x5865F2
-    STATUS_BLOCKED = 0xFEE75C
-    STATUS_DONE = 0x57F287
-
-
-def get_status_color(status: str) -> int:
-    """Get color for task status."""
-    return {
-        "todo": Colors.STATUS_TODO,
-        "in_progress": Colors.STATUS_IN_PROGRESS,
-        "blocked": Colors.STATUS_BLOCKED,
-        "done": Colors.STATUS_DONE,
-    }.get(status, Colors.NEUTRAL)
-
-
-# ============================================================================
-# Text Formatting Utilities
-# ============================================================================
-
-def ascii_box(content: str, title: str | None = None, width: int = 50) -> str:
-    """
-    Create an ASCII box around content.
-
-    +--[ Title ]---------------------------+
-    | Content line 1                       |
-    | Content line 2                       |
-    +--------------------------------------+
-    """
-    lines = content.split("\n")
-    inner_width = width - 4  # Account for "| " and " |"
-
-    # Build top border
-    if title:
-        title_part = f"[ {title} ]"
-        remaining = width - 2 - len(title_part)
-        top = BOX_TL + BOX_H + title_part + BOX_H * remaining + BOX_TR
-    else:
-        top = BOX_TL + BOX_H * (width - 2) + BOX_TR
-
-    # Build content lines
-    content_lines = []
-    for line in lines:
-        # Truncate or pad line
-        if len(line) > inner_width:
-            line = line[:inner_width - 3] + "..."
-        padded = line.ljust(inner_width)
-        content_lines.append(f"{BOX_V} {padded} {BOX_V}")
-
-    # Build bottom border
-    bottom = BOX_BL + BOX_H * (width - 2) + BOX_BR
-
-    return "\n".join([top] + content_lines + [bottom])
-
-
-def format_timestamp(dt: datetime | None) -> str:
-    """Format datetime for display."""
-    if dt is None:
-        return "---"
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
-
-
-def format_relative_time(dt: datetime | None) -> str:
-    """Format datetime as relative time."""
-    if dt is None:
-        return "---"
+def format_due(due_at: datetime | None) -> str:
+    """Format due date as relative time."""
+    if not due_at:
+        return "Pas de deadline"
 
     now = datetime.now(timezone.utc)
-    delta = dt - now
+    delta = due_at - now
     days = delta.days
 
-    if days < 0:
+    if days < -1:
         return f"{abs(days)}j en retard"
+    elif days == -1:
+        return "Hier"
     elif days == 0:
         return "Aujourd'hui"
     elif days == 1:
         return "Demain"
-    else:
+    elif days < 7:
         return f"Dans {days}j"
+    else:
+        return due_at.strftime("%d/%m")
 
 
-def truncate(text: str, max_length: int = 50) -> str:
-    """Truncate text with ellipsis."""
-    if len(text) <= max_length:
-        return text
-    return text[:max_length - 3] + "..."
+def short_id(task_id: UUID | str) -> str:
+    """Get short task ID for display."""
+    return str(task_id)[:8]
 
 
-# ============================================================================
-# Task Formatting
-# ============================================================================
-
-def format_task_row(task: "Task", show_description: bool = False) -> str:
-    """
-    Format a single task as a table row.
-
-    [ ] abc123 | Fix the bug       | 2024-01-15
-    """
-    task_id = str(task.id)[:8]
-    icon = STATUS_ICONS.get(task.status, "[ ]")
-    title = truncate(task.title, 30)
-    due = format_timestamp(task.due_at)
-
-    row = f"{icon} {task_id} | {title:<30} | {due}"
-
-    if show_description and task.description:
-        desc = truncate(task.description, 45)
-        row += f"\n    > {desc}"
-
-    return row
+def get_status_label(status: str) -> str:
+    """Get human-readable status label."""
+    return STATUS_CONFIG.get(status, {}).get("label", status)
 
 
-def format_task_table(tasks: Iterable["Task"]) -> str:
-    """
-    Format tasks as an ASCII table.
-
-    +--[ TACHES ]-------------------------------------------+
-    | ST  ID       | Titre                          | Deadline   |
-    |-----------------------------------------------------+
-    | [ ] abc123   | Fix the bug                    | 2024-01-15 |
-    | [x] def456   | Add feature                    | 2024-01-10 |
-    +-----------------------------------------------------+
-    """
-    task_list = list(tasks)
-    if not task_list:
-        return ascii_box("Aucune tache.", title="TACHES", width=56)
-
-    header = "ST   ID       | Titre                          | Deadline"
-    separator = BOX_H * 54
-
-    rows = [header, separator]
-    for task in task_list:
-        rows.append(format_task_row(task))
-
-    content = "\n".join(rows)
-    return ascii_box(content, title="TACHES", width=56)
+def get_status_color(status: str) -> int:
+    """Get color for status."""
+    return STATUS_CONFIG.get(status, {}).get("color", 0x99AAB5)
 
 
 # ============================================================================
-# Discord Embeds
+# Task Creation Modal
 # ============================================================================
 
-def create_base_embed(
-    title: str,
-    description: str | None = None,
-    color: int = Colors.PRIMARY,
-) -> discord.Embed:
-    """Create a base embed with consistent styling."""
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=color,
-        timestamp=datetime.now(timezone.utc),
+class TaskCreateModal(ui.Modal, title="Nouvelle tache"):
+    """Modal for creating a new task with full details."""
+
+    task_title = ui.TextInput(
+        label="Titre",
+        placeholder="Ex: Corriger le bug de login",
+        min_length=1,
+        max_length=200,
+        required=True,
     )
-    embed.set_footer(text=MINI_LOGO)
-    return embed
 
-
-def embed_success(title: str, description: str | None = None) -> discord.Embed:
-    """Create a success embed."""
-    return create_base_embed(f"[OK] {title}", description, Colors.SUCCESS)
-
-
-def embed_error(title: str, description: str | None = None) -> discord.Embed:
-    """Create an error embed."""
-    return create_base_embed(f"[ERR] {title}", description, Colors.ERROR)
-
-
-def embed_warning(title: str, description: str | None = None) -> discord.Embed:
-    """Create a warning embed."""
-    return create_base_embed(f"[!] {title}", description, Colors.WARNING)
-
-
-def embed_info(title: str, description: str | None = None) -> discord.Embed:
-    """Create an info embed."""
-    return create_base_embed(f"[i] {title}", description, Colors.INFO)
-
-
-# ============================================================================
-# Specific Embeds
-# ============================================================================
-
-def embed_workspace_setup(guild_name: str, timezone_str: str) -> discord.Embed:
-    """Create workspace setup confirmation embed."""
-    embed = embed_success("Workspace initialise")
-
-    config_block = f"""```
-+--[ Configuration ]---------------------+
-| Serveur  : {truncate(guild_name, 28):<28} |
-| Timezone : {timezone_str:<28} |
-| Status   : Actif                       |
-+-----------------------------------------+
-```"""
-
-    embed.description = config_block
-    embed.add_field(
-        name="Prochaines etapes",
-        value="```\n> /task add   - Creer une tache\n> /task list  - Voir les taches\n> /help       - Aide complete\n```",
-        inline=False,
+    description = ui.TextInput(
+        label="Description (optionnel)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Details supplementaires...",
+        required=False,
+        max_length=1000,
     )
-    return embed
 
+    due_days = ui.TextInput(
+        label="Deadline en jours (optionnel)",
+        placeholder="Ex: 3 (pour dans 3 jours)",
+        required=False,
+        max_length=3,
+    )
 
-def embed_task_created(task: "Task") -> discord.Embed:
-    """Create task creation confirmation embed."""
-    task_id = str(task.id)[:8]
-    embed = embed_success("Tache creee")
+    def __init__(
+        self,
+        callback: Callable[[discord.Interaction, str, str | None, int | None], Coroutine[Any, Any, None]],
+    ) -> None:
+        super().__init__(timeout=300)
+        self._callback = callback
 
-    task_block = f"""```
-+--[ Nouvelle tache ]--------------------+
-| ID    : {task_id:<31} |
-| Titre : {truncate(task.title, 31):<31} |
-| Status: {task.status:<31} |
-| Due   : {format_timestamp(task.due_at):<31} |
-+-----------------------------------------+
-```"""
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        title = self.task_title.value.strip()
+        description = self.description.value.strip() or None
 
-    embed.description = task_block
+        due_in_days: int | None = None
+        if self.due_days.value.strip():
+            try:
+                due_in_days = int(self.due_days.value.strip())
+            except ValueError:
+                await interaction.response.send_message(
+                    "La deadline doit etre un nombre.",
+                    ephemeral=True,
+                )
+                return
 
-    if task.description:
-        embed.add_field(
-            name="Description",
-            value=f"```\n{truncate(task.description, 200)}\n```",
-            inline=False,
+        await self._callback(interaction, title, description, due_in_days)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        LOGGER.exception("Modal error: %s", error)
+        await interaction.response.send_message(
+            "Une erreur est survenue.",
+            ephemeral=True,
         )
 
+
+# ============================================================================
+# Task Edit Modal
+# ============================================================================
+
+class TaskEditModal(ui.Modal, title="Modifier la tache"):
+    """Modal for editing an existing task."""
+
+    task_title = ui.TextInput(
+        label="Titre",
+        min_length=1,
+        max_length=200,
+        required=True,
+    )
+
+    description = ui.TextInput(
+        label="Description",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(
+        self,
+        task_id: str,
+        current_title: str,
+        current_description: str | None,
+        callback: Callable[[discord.Interaction, str, str, str | None], Coroutine[Any, Any, None]],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.task_id = task_id
+        self.task_title.default = current_title
+        self.description.default = current_description or ""
+        self._callback = callback
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self._callback(
+            interaction,
+            self.task_id,
+            self.task_title.value.strip(),
+            self.description.value.strip() or None,
+        )
+
+
+# ============================================================================
+# Status Select Menu
+# ============================================================================
+
+class StatusSelect(ui.Select):
+    """Select menu for changing task status."""
+
+    def __init__(
+        self,
+        task_id: str,
+        current_status: str,
+        callback: Callable[[discord.Interaction, str, str], Coroutine[Any, Any, None]],
+    ) -> None:
+        self.task_id = task_id
+        self._callback = callback
+
+        options = []
+        for status, config in STATUS_CONFIG.items():
+            options.append(
+                discord.SelectOption(
+                    label=config["label"],
+                    value=status,
+                    default=(status == current_status),
+                )
+            )
+
+        super().__init__(
+            placeholder="Changer le statut...",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        new_status = self.values[0]
+        await self._callback(interaction, self.task_id, new_status)
+
+
+# ============================================================================
+# Task Action Buttons
+# ============================================================================
+
+class TaskActionView(ui.View):
+    """View with action buttons for a single task."""
+
+    def __init__(
+        self,
+        task: "Task",
+        on_done: Callable[[discord.Interaction, str], Coroutine[Any, Any, None]],
+        on_edit: Callable[[discord.Interaction, "Task"], Coroutine[Any, Any, None]],
+        on_status_change: Callable[[discord.Interaction, str, str], Coroutine[Any, Any, None]],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.task = task
+        self._on_done = on_done
+        self._on_edit = on_edit
+
+        task_id = str(task.id)
+
+        # Add status select
+        self.add_item(StatusSelect(task_id, task.status, on_status_change))
+
+        # Quick done button (only if not already done)
+        if task.status != "done":
+            done_btn = ui.Button(
+                label="Terminer",
+                style=discord.ButtonStyle.success,
+                custom_id=f"done:{task_id[:8]}",
+            )
+            done_btn.callback = self._handle_done
+            self.add_item(done_btn)
+
+        # Edit button
+        edit_btn = ui.Button(
+            label="Modifier",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"edit:{task_id[:8]}",
+        )
+        edit_btn.callback = self._handle_edit
+        self.add_item(edit_btn)
+
+    async def _handle_done(self, interaction: discord.Interaction) -> None:
+        await self._on_done(interaction, str(self.task.id))
+
+    async def _handle_edit(self, interaction: discord.Interaction) -> None:
+        await self._on_edit(interaction, self.task)
+
+
+# ============================================================================
+# Task List View with Pagination
+# ============================================================================
+
+class TaskListView(ui.View):
+    """Paginated task list with filters and quick actions."""
+
+    def __init__(
+        self,
+        tasks: list["Task"],
+        on_task_select: Callable[[discord.Interaction, str], Coroutine[Any, Any, None]],
+        on_create: Callable[[discord.Interaction], Coroutine[Any, Any, None]],
+        on_refresh: Callable[[discord.Interaction], Coroutine[Any, Any, None]],
+        current_filter: str = "all",
+    ) -> None:
+        super().__init__(timeout=300)
+        self.all_tasks = tasks
+        self.current_filter = current_filter
+        self.page = 0
+        self._on_task_select = on_task_select
+        self._on_create = on_create
+        self._on_refresh = on_refresh
+
+        self._update_components()
+
+    @property
+    def filtered_tasks(self) -> list["Task"]:
+        """Get tasks filtered by current filter."""
+        if self.current_filter == "all":
+            return self.all_tasks
+        return [t for t in self.all_tasks if t.status == self.current_filter]
+
+    @property
+    def total_pages(self) -> int:
+        """Get total number of pages."""
+        return max(1, (len(self.filtered_tasks) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+
+    @property
+    def current_page_tasks(self) -> list["Task"]:
+        """Get tasks for current page."""
+        start = self.page * ITEMS_PER_PAGE
+        end = start + ITEMS_PER_PAGE
+        return self.filtered_tasks[start:end]
+
+    def _update_components(self) -> None:
+        """Update view components based on current state."""
+        self.clear_items()
+
+        # Filter select (row 0)
+        filter_options = [
+            discord.SelectOption(label="Toutes", value="all", default=self.current_filter == "all"),
+            discord.SelectOption(label="A faire", value="todo", default=self.current_filter == "todo"),
+            discord.SelectOption(label="En cours", value="in_progress", default=self.current_filter == "in_progress"),
+            discord.SelectOption(label="Bloquees", value="blocked", default=self.current_filter == "blocked"),
+            discord.SelectOption(label="Terminees", value="done", default=self.current_filter == "done"),
+        ]
+
+        filter_select = ui.Select(
+            placeholder="Filtrer par statut...",
+            options=filter_options,
+            row=0,
+        )
+        filter_select.callback = self._handle_filter
+        self.add_item(filter_select)
+
+        # Task select (row 1) - only if there are tasks
+        if self.current_page_tasks:
+            task_options = []
+            for task in self.current_page_tasks:
+                status_label = get_status_label(task.status)
+                due = format_due(task.due_at)
+
+                task_options.append(
+                    discord.SelectOption(
+                        label=task.title[:50] if len(task.title) > 50 else task.title,
+                        value=str(task.id),
+                        description=f"{status_label} | {due}",
+                    )
+                )
+
+            task_select = ui.Select(
+                placeholder="Selectionner une tache...",
+                options=task_options,
+                row=1,
+            )
+            task_select.callback = self._handle_task_select
+            self.add_item(task_select)
+
+        # Navigation buttons (row 2)
+        prev_btn = ui.Button(
+            label="<",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page == 0,
+            row=2,
+        )
+        prev_btn.callback = self._handle_prev
+        self.add_item(prev_btn)
+
+        page_btn = ui.Button(
+            label=f"{self.page + 1}/{self.total_pages}",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+            row=2,
+        )
+        self.add_item(page_btn)
+
+        next_btn = ui.Button(
+            label=">",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page >= self.total_pages - 1,
+            row=2,
+        )
+        next_btn.callback = self._handle_next
+        self.add_item(next_btn)
+
+        # Action buttons (row 3)
+        create_btn = ui.Button(
+            label="+ Nouvelle tache",
+            style=discord.ButtonStyle.success,
+            row=3,
+        )
+        create_btn.callback = self._handle_create
+        self.add_item(create_btn)
+
+        refresh_btn = ui.Button(
+            label="Actualiser",
+            style=discord.ButtonStyle.secondary,
+            row=3,
+        )
+        refresh_btn.callback = self._handle_refresh
+        self.add_item(refresh_btn)
+
+    async def _handle_filter(self, interaction: discord.Interaction) -> None:
+        self.current_filter = interaction.data["values"][0]  # type: ignore
+        self.page = 0
+        self._update_components()
+        await interaction.response.edit_message(
+            embed=self._build_embed(),
+            view=self,
+        )
+
+    async def _handle_task_select(self, interaction: discord.Interaction) -> None:
+        task_id = interaction.data["values"][0]  # type: ignore
+        await self._on_task_select(interaction, task_id)
+
+    async def _handle_prev(self, interaction: discord.Interaction) -> None:
+        self.page = max(0, self.page - 1)
+        self._update_components()
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    async def _handle_next(self, interaction: discord.Interaction) -> None:
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._update_components()
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    async def _handle_create(self, interaction: discord.Interaction) -> None:
+        await self._on_create(interaction)
+
+    async def _handle_refresh(self, interaction: discord.Interaction) -> None:
+        await self._on_refresh(interaction)
+
+    def _build_embed(self) -> discord.Embed:
+        """Build the task list embed."""
+        return build_task_list_embed(
+            self.filtered_tasks,
+            page=self.page,
+            total_pages=self.total_pages,
+            filter_label=get_status_label(self.current_filter) if self.current_filter != "all" else None,
+        )
+
+
+# ============================================================================
+# Quick Actions View (Persistent)
+# ============================================================================
+
+class QuickActionsView(ui.View):
+    """Persistent view with quick action buttons."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @ui.button(
+        label="Mes taches",
+        style=discord.ButtonStyle.primary,
+        custom_id="projectbot:quick:list",
+    )
+    async def list_tasks(self, interaction: discord.Interaction, button: ui.Button) -> None:
+        # This will be handled by the bot's persistent view handler
+        pass
+
+    @ui.button(
+        label="+ Nouvelle",
+        style=discord.ButtonStyle.success,
+        custom_id="projectbot:quick:create",
+    )
+    async def create_task(self, interaction: discord.Interaction, button: ui.Button) -> None:
+        # This will be handled by the bot's persistent view handler
+        pass
+
+    @ui.button(
+        label="Status",
+        style=discord.ButtonStyle.secondary,
+        custom_id="projectbot:quick:status",
+    )
+    async def show_status(self, interaction: discord.Interaction, button: ui.Button) -> None:
+        # This will be handled by the bot's persistent view handler
+        pass
+
+
+# ============================================================================
+# Embed Builders
+# ============================================================================
+
+def build_task_embed(task: "Task") -> discord.Embed:
+    """Build embed for a single task."""
+    status_config = STATUS_CONFIG.get(task.status, STATUS_CONFIG["todo"])
+
+    embed = discord.Embed(
+        title=task.title,
+        description=task.description or "_Pas de description_",
+        color=status_config["color"],
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    embed.add_field(
+        name="Statut",
+        value=status_config["label"],
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Deadline",
+        value=format_due(task.due_at),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="ID",
+        value=f"`{short_id(task.id)}`",
+        inline=True,
+    )
+
+    embed.set_footer(text="ProjectBot")
+
     return embed
 
 
-def embed_task_list(tasks: Iterable["Task"], workspace_name: str | None = None) -> discord.Embed:
-    """Create task list embed."""
-    task_list = list(tasks)
-
-    if not task_list:
-        embed = embed_info("Liste des taches")
-        embed.description = "```\nAucune tache pour le moment.\n\n> Utilisez /task add pour creer une tache\n```"
+def build_task_list_embed(
+    tasks: list["Task"],
+    page: int = 0,
+    total_pages: int = 1,
+    filter_label: str | None = None,
+) -> discord.Embed:
+    """Build embed for task list."""
+    if not tasks:
+        embed = discord.Embed(
+            title="Taches",
+            description="Aucune tache trouvee.\n\nUtilisez le bouton **+ Nouvelle tache** pour commencer.",
+            color=0x99AAB5,
+        )
+        embed.set_footer(text="ProjectBot")
         return embed
 
     # Count by status
     counts = {"todo": 0, "in_progress": 0, "blocked": 0, "done": 0}
-    for task in task_list:
+    for task in tasks:
         if task.status in counts:
             counts[task.status] += 1
 
-    embed = embed_info(f"Liste des taches ({len(task_list)})")
+    # Summary line
+    summary_parts = []
+    if counts["todo"]:
+        summary_parts.append(f"{counts['todo']} a faire")
+    if counts["in_progress"]:
+        summary_parts.append(f"{counts['in_progress']} en cours")
+    if counts["blocked"]:
+        summary_parts.append(f"{counts['blocked']} bloquees")
+    if counts["done"]:
+        summary_parts.append(f"{counts['done']} terminees")
 
-    # Summary bar
-    summary = f"[ ] {counts['todo']}  [~] {counts['in_progress']}  [!] {counts['blocked']}  [x] {counts['done']}"
+    summary = " | ".join(summary_parts) if summary_parts else "Aucune tache"
 
-    # Build task table
-    lines = [DIVIDER_LIGHT, summary, DIVIDER_LIGHT, ""]
+    title = "Taches"
+    if filter_label:
+        title = f"Taches - {filter_label}"
 
-    for task in task_list:
-        task_id = str(task.id)[:8]
-        icon = STATUS_ICONS.get(task.status, "[ ]")
-        due = format_relative_time(task.due_at)
-        lines.append(f"{icon} {task_id} {truncate(task.title, 25):<25} {due}")
+    embed = discord.Embed(
+        title=title,
+        description=summary,
+        color=0x5865F2,
+    )
 
-    lines.append("")
-    lines.append(DIVIDER_LIGHT)
+    # Show tasks for current page
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    page_tasks = tasks[start:end]
 
-    embed.description = f"```\n{chr(10).join(lines)}\n```"
+    for task in page_tasks:
+        status_label = get_status_label(task.status)
+        due = format_due(task.due_at)
+
+        value = f"{status_label} | {due}"
+        if task.description:
+            desc_preview = task.description[:80]
+            if len(task.description) > 80:
+                desc_preview += "..."
+            value = f"{desc_preview}\n_{status_label} | {due}_"
+
+        embed.add_field(
+            name=f"`{short_id(task.id)}` {task.title}",
+            value=value,
+            inline=False,
+        )
+
+    embed.set_footer(text=f"Page {page + 1}/{total_pages} | ProjectBot")
 
     return embed
 
 
-def embed_task_done(task: "Task") -> discord.Embed:
-    """Create task completion embed."""
-    task_id = str(task.id)[:8]
-    embed = embed_success("Tache terminee")
-
-    embed.description = f"""```
-+--[ Termine ]---------------------------+
-| ID    : {task_id:<31} |
-| Titre : {truncate(task.title, 31):<31} |
-| Status: done                           |
-+-----------------------------------------+
-```"""
-
+def build_success_embed(title: str, description: str | None = None) -> discord.Embed:
+    """Build a success embed."""
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=0x57F287,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="ProjectBot")
     return embed
 
 
-def embed_task_not_found(task_id_prefix: str) -> discord.Embed:
-    """Create task not found error embed."""
-    embed = embed_error("Tache introuvable")
-    embed.description = f"""```
-Aucune tache trouvee avec l'ID: {task_id_prefix}
-
-> Verifiez l'ID avec /task list
-> L'ID doit correspondre au debut de l'identifiant
-```"""
+def build_error_embed(title: str, description: str | None = None) -> discord.Embed:
+    """Build an error embed."""
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=0xED4245,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="ProjectBot")
     return embed
 
 
-def embed_status(db_ok: bool, redis_ok: bool) -> discord.Embed:
-    """Create system status embed."""
+def build_status_embed(db_ok: bool, redis_ok: bool, latency_ms: float | None = None) -> discord.Embed:
+    """Build system status embed."""
     all_ok = db_ok and redis_ok
-    embed = embed_success("Status systeme") if all_ok else embed_warning("Status systeme")
 
-    db_status = "[OK]" if db_ok else "[KO]"
-    redis_status = "[OK]" if redis_ok else "[KO]"
-
-    status_block = f"""```
-+--[ Diagnostics ]-----------------------+
-|                                        |
-|   Database    : {db_status:<22} |
-|   Redis       : {redis_status:<22} |
-|                                        |
-|   Global      : {'[OK] Operationnel' if all_ok else '[!!] Degraded':<22} |
-|                                        |
-+-----------------------------------------+
-```"""
-
-    embed.description = status_block
-    return embed
-
-
-def embed_help() -> discord.Embed:
-    """Create help embed."""
-    embed = embed_info("Aide - ProjectBot")
-
-    embed.description = f"""```
-{BRAND_HEADER}
-```"""
-
-    embed.add_field(
-        name="Configuration",
-        value="```\n/setup [timezone]  Initialiser le workspace\n/status            Diagnostics systeme\n```",
-        inline=False,
+    embed = discord.Embed(
+        title="Status du systeme",
+        color=0x57F287 if all_ok else 0xFEE75C,
+        timestamp=datetime.now(timezone.utc),
     )
 
     embed.add_field(
-        name="Gestion des taches",
-        value="```\n/task add          Creer une nouvelle tache\n/task list         Lister les taches\n/task done <id>    Marquer comme termine\n```",
-        inline=False,
+        name="Base de donnees",
+        value="Connectee" if db_ok else "Erreur",
+        inline=True,
     )
 
     embed.add_field(
-        name="Legende des statuts",
-        value="```\n[ ] todo        - A faire\n[~] in_progress - En cours\n[!] blocked     - Bloque\n[x] done        - Termine\n```",
-        inline=False,
+        name="Redis",
+        value="Connecte" if redis_ok else "Erreur",
+        inline=True,
     )
+
+    if latency_ms is not None:
+        embed.add_field(
+            name="Latence",
+            value=f"{latency_ms:.0f}ms",
+            inline=True,
+        )
+
+    embed.set_footer(text="ProjectBot")
 
     return embed
 
 
-def embed_ping(latency_ms: float | None = None) -> discord.Embed:
-    """Create ping response embed."""
-    embed = embed_success("Pong")
+def build_help_embed() -> discord.Embed:
+    """Build help embed."""
+    embed = discord.Embed(
+        title="ProjectBot - Aide",
+        description="Gestionnaire de taches pour Discord",
+        color=0x5865F2,
+    )
 
-    latency_str = f"{latency_ms:.0f}ms" if latency_ms else "---"
+    embed.add_field(
+        name="Commandes",
+        value=(
+            "`/setup` - Initialiser le workspace\n"
+            "`/task` - Ouvrir le gestionnaire de taches\n"
+            "`/task add` - Creer une tache rapidement\n"
+            "`/status` - Voir l'etat du systeme\n"
+            "`/help` - Cette aide"
+        ),
+        inline=False,
+    )
 
-    embed.description = f"""```
-+--[ Health Check ]----------------------+
-|                                        |
-|   Status   : Online                    |
-|   Latency  : {latency_str:<26} |
-|                                        |
-+-----------------------------------------+
-```"""
+    embed.add_field(
+        name="Utilisation",
+        value=(
+            "1. Utilisez `/setup` pour configurer\n"
+            "2. Utilisez `/task` pour voir vos taches\n"
+            "3. Cliquez sur une tache pour la modifier\n"
+            "4. Utilisez les boutons pour naviguer"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text="ProjectBot")
 
     return embed
 
 
-def embed_guild_only() -> discord.Embed:
-    """Create guild-only error embed."""
-    embed = embed_error("Commande non disponible")
-    embed.description = "```\nCette commande est uniquement\ndisponible dans un serveur Discord.\n```"
+def build_workspace_setup_embed(guild_name: str, timezone_str: str) -> discord.Embed:
+    """Build workspace setup confirmation embed."""
+    embed = discord.Embed(
+        title="Workspace configure",
+        description=f"Le workspace **{guild_name}** est pret.",
+        color=0x57F287,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    embed.add_field(name="Timezone", value=timezone_str, inline=True)
+    embed.add_field(name="Prochaine etape", value="Utilisez `/task` pour commencer", inline=True)
+    embed.set_footer(text="ProjectBot")
+
     return embed
