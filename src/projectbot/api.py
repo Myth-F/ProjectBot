@@ -1,9 +1,11 @@
 import logging
+import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from .config import get_settings
-from .logging import configure_logging
+from .db import init_db
+from .logging import configure_logging, log_context
 
 
 def create_app() -> FastAPI:
@@ -11,6 +13,18 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
 
     app = FastAPI(title="ProjectBot API", version="0.1.0")
+
+    @app.on_event("startup")
+    async def startup() -> None:
+        await init_db()
+
+    @app.middleware("http")
+    async def add_request_context(request: Request, call_next):
+        correlation_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+        with log_context(correlation_id=correlation_id):
+            response = await call_next(request)
+        response.headers["X-Request-Id"] = correlation_id
+        return response
 
     @app.get("/health")
     async def health() -> dict:
