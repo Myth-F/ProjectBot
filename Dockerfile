@@ -7,6 +7,6 @@ RUN pip install --no-cache-dir .
 
 COPY src/ ./src/
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app/src
 
 CMD ["python", "-m", "projectbot.api"]
